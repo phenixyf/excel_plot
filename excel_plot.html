@@ -160,6 +160,52 @@
       tab-size: 4;
     }
 
+    .metric-result {
+      display: none;
+      margin-top: 7px;
+      padding: 7px 9px;
+      border: 1px solid #c7d7fe;
+      border-radius: 6px;
+      background: var(--accent-soft);
+      color: #174ea6;
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    .metric-result.active {
+      display: block;
+    }
+
+    .metric-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 22px;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .metric-row + .metric-row {
+      margin-top: 5px;
+      padding-top: 5px;
+      border-top: 1px solid rgba(36, 107, 254, 0.16);
+    }
+
+    .metric-clear {
+      width: 22px;
+      height: 22px;
+      padding: 0;
+      border: 0;
+      border-radius: 4px;
+      background: transparent;
+      color: #174ea6;
+      font-size: 15px;
+      line-height: 1;
+    }
+
+    .metric-clear:hover {
+      background: rgba(36, 107, 254, 0.12);
+      color: var(--danger);
+    }
+
     .x-data textarea {
       min-height: 112px;
     }
@@ -295,6 +341,44 @@
       z-index: 3;
     }
 
+    .color-picker {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 1px;
+      height: 1px;
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .metric-menu {
+      position: absolute;
+      display: none;
+      min-width: 128px;
+      padding: 5px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.98);
+      box-shadow: 0 10px 24px rgba(31, 41, 51, 0.16);
+      z-index: 4;
+    }
+
+    .metric-menu button {
+      width: 100%;
+      height: 30px;
+      padding: 0 10px;
+      border: 0;
+      background: transparent;
+      text-align: left;
+      color: var(--text);
+      font-size: 13px;
+    }
+
+    .metric-menu button:hover {
+      background: var(--accent-soft);
+      color: #174ea6;
+    }
+
     .plot-footer {
       display: flex;
       align-items: center;
@@ -335,6 +419,11 @@
       height: 10px;
       border-radius: 50%;
       border: 1px solid rgba(31, 41, 51, 0.18);
+    }
+
+    .swatch.selected {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
     }
 
     @media (max-width: 900px) {
@@ -432,6 +521,12 @@
       <div id="canvasWrap" class="canvas-wrap">
         <canvas id="plotCanvas" class="pan-mode"></canvas>
         <div id="tooltip" class="tooltip"></div>
+        <input id="colorPicker" class="color-picker" type="color" aria-label="修改曲线颜色" />
+        <div id="metricMenu" class="metric-menu" role="menu" aria-label="统计选项">
+          <button type="button" data-metric="max" role="menuitem">最大值 (MAX)</button>
+          <button type="button" data-metric="min" role="menuitem">最小值 (MIN)</button>
+          <button type="button" data-metric="rms" role="menuitem">有效值 (RMS)</button>
+        </div>
       </div>
 
       <div class="plot-footer">
@@ -461,6 +556,8 @@
         canvas: document.getElementById("plotCanvas"),
         canvasWrap: document.getElementById("canvasWrap"),
         tooltip: document.getElementById("tooltip"),
+        colorPicker: document.getElementById("colorPicker"),
+        metricMenu: document.getElementById("metricMenu"),
         status: document.getElementById("status"),
         message: document.getElementById("message"),
         swatches: document.getElementById("swatches")
@@ -477,7 +574,11 @@
         startView: null,
         selection: null,
         hover: null,
+        colorTarget: null,
+        selectedTrace: null,
+        metricSelections: {},
         xKind: "number",
+        xLabels: [],
         dpr: 1,
         rect: { left: 70, right: 22, top: 24, bottom: 52, width: 0, height: 0 }
       };
@@ -558,21 +659,38 @@
 
       function parseX(text) {
         const tokens = splitExcelText(text, "x");
+        if (!tokens.length) return { values: [], labels: [], kind: "number" };
         const values = [];
+        let numericCount = 0;
         let dateCount = 0;
+        let categoryNeeded = false;
         tokens.forEach((token) => {
           const n = parseNumericValue(token);
           if (Number.isFinite(n)) {
             values.push(n);
+            numericCount += 1;
             return;
           }
           const ms = parseDateValue(token);
           if (ms !== null) {
             values.push(ms);
             dateCount += 1;
+            return;
           }
+          categoryNeeded = true;
         });
-        return { values, kind: dateCount > 0 && dateCount === values.length ? "date" : "number" };
+        if (categoryNeeded || values.length !== tokens.length || (numericCount > 0 && dateCount > 0)) {
+          return {
+            values: tokens.map((_, index) => index),
+            labels: tokens,
+            kind: "category"
+          };
+        }
+        return {
+          values,
+          labels: tokens,
+          kind: dateCount > 0 && dateCount === values.length ? "date" : "number"
+        };
       }
 
       function formatNumber(value) {
@@ -598,6 +716,10 @@
       }
 
       function formatX(value) {
+        if (state.xKind === "category") {
+          const index = Math.round(value);
+          return state.xLabels[index] ?? "";
+        }
         return state.xKind === "date" ? formatDate(value) : formatNumber(value);
       }
 
@@ -614,6 +736,7 @@
             </div>
           </div>
           <textarea id="yInput${index}" spellcheck="false"></textarea>
+          <div id="yMetric${index}" class="metric-result" aria-live="polite"></div>
         `;
         field.querySelector(".paste-clear").addEventListener("click", () => {
           field.querySelector("textarea").value = "";
@@ -635,6 +758,7 @@
           const field = createYField(i, data[i]?.name || `Y${i + 1}`);
           field.querySelector("textarea").value = data[i]?.text || "";
           els.yFields.appendChild(field);
+          renderMetricForField(i);
         }
         renderSwatches();
       }
@@ -652,9 +776,11 @@
           const len = hasX ? Math.min(parsedX.values.length, y.length) : y.length;
           if (len < 2) return;
           const x = hasX ? parsedX.values.slice(0, len) : Array.from({ length: len }, (_, i) => i + 1);
+          const previousTrace = state.traces.find((trace) => trace.fieldIndex === index);
           traces.push({
             name,
-            color: colors[index % colors.length],
+            fieldIndex: index,
+            color: previousTrace?.color || colors[index % colors.length],
             x,
             y: y.slice(0, len)
           });
@@ -665,6 +791,7 @@
         }
 
         state.xKind = parsedX.values.length > 0 ? parsedX.kind : "number";
+        state.xLabels = parsedX.kind === "category" ? parsedX.labels : [];
         return traces;
       }
 
@@ -710,12 +837,15 @@
 
       function plotFromInputs() {
         try {
+          const selectedFieldIndex = state.selectedTrace?.fieldIndex;
           state.traces = collectData();
           state.bounds = computeBounds(state.traces);
           state.view = { ...state.bounds };
+          state.selectedTrace = state.traces.find((trace) => trace.fieldIndex === selectedFieldIndex) || null;
           state.hover = null;
           setMessage(`已绘制 ${state.traces.length} 条曲线`, "ok");
           updateStatus();
+          renderAllMetricResults();
           renderSwatches();
           resizeCanvas();
         } catch (error) {
@@ -731,13 +861,20 @@
         els.status.textContent = `X ${formatX(state.view.xmin)} 到 ${formatX(state.view.xmax)}，Y ${formatNumber(state.view.ymin)} 到 ${formatNumber(state.view.ymax)}`;
       }
 
+      function findTraceByFieldIndex(fieldIndex) {
+        return state.traces.find((trace) => trace.fieldIndex === fieldIndex) || null;
+      }
+
       function renderSwatches() {
         const count = clamp(Number(els.seriesCount.value) || 1, 1, 12);
         els.swatches.innerHTML = "";
         for (let i = 0; i < count; i += 1) {
+          const trace = findTraceByFieldIndex(i);
           const swatch = document.createElement("span");
           swatch.className = "swatch";
-          swatch.style.background = colors[i % colors.length];
+          if (state.selectedTrace?.fieldIndex === i) swatch.classList.add("selected");
+          swatch.style.background = trace?.color || colors[i % colors.length];
+          swatch.title = trace ? trace.name : `Y${i + 1}`;
           els.swatches.appendChild(swatch);
         }
       }
@@ -797,6 +934,21 @@
         return ticks;
       }
 
+      function makeCategoryTicks(min, max, target = 8) {
+        const lastIndex = state.xLabels.length - 1;
+        if (lastIndex < 0) return [];
+        const start = clamp(Math.ceil(min), 0, lastIndex);
+        const end = clamp(Math.floor(max), 0, lastIndex);
+        if (end < start) return [];
+        const visibleCount = end - start + 1;
+        const step = Math.max(1, Math.ceil(visibleCount / target));
+        const ticks = [];
+        for (let v = start; v <= end; v += step) {
+          ticks.push(v);
+        }
+        return ticks;
+      }
+
       function drawGridAndAxes() {
         const r = plotRect();
         ctx.clearRect(0, 0, state.rect.width, state.rect.height);
@@ -817,7 +969,10 @@
         ctx.fillStyle = "#667085";
         ctx.textBaseline = "middle";
 
-        const xTicks = makeTicks(state.view.xmin, state.view.xmax, 8);
+        const xTarget = Math.max(2, Math.floor(r.w / 84));
+        const xTicks = state.xKind === "category"
+          ? makeCategoryTicks(state.view.xmin, state.view.xmax, xTarget)
+          : makeTicks(state.view.xmin, state.view.xmax, 8);
         const yTicks = makeTicks(state.view.ymin, state.view.ymax, 7);
 
         xTicks.forEach((tick) => {
@@ -858,25 +1013,32 @@
         ctx.clip();
 
         state.traces.forEach((trace) => {
-          ctx.strokeStyle = trace.color;
-          ctx.lineWidth = 2;
-          ctx.beginPath();
-          trace.x.forEach((x, index) => {
-            const px = xToPx(x);
-            const py = yToPx(trace.y[index]);
-            if (index === 0) ctx.moveTo(px, py);
-            else ctx.lineTo(px, py);
-          });
-          ctx.stroke();
+          const selected = state.selectedTrace?.fieldIndex === trace.fieldIndex;
+          const strokeTrace = (lineWidth, color) => {
+            ctx.strokeStyle = color;
+            ctx.lineWidth = lineWidth;
+            ctx.beginPath();
+            trace.x.forEach((x, index) => {
+              const px = xToPx(x);
+              const py = yToPx(trace.y[index]);
+              if (index === 0) ctx.moveTo(px, py);
+              else ctx.lineTo(px, py);
+            });
+            ctx.stroke();
+          };
+
+          if (selected) strokeTrace(7, "rgba(31, 41, 51, 0.16)");
+          strokeTrace(selected ? 3 : 2, trace.color);
 
           if (trace.x.length <= 160) {
             ctx.fillStyle = trace.color;
+            const pointRadius = selected ? 3.2 : 2.4;
             trace.x.forEach((x, index) => {
               const px = xToPx(x);
               const py = yToPx(trace.y[index]);
               if (px < r.x - 3 || px > r.x + r.w + 3 || py < r.y - 3 || py > r.y + r.h + 3) return;
               ctx.beginPath();
-              ctx.arc(px, py, 2.4, 0, Math.PI * 2);
+              ctx.arc(px, py, pointRadius, 0, Math.PI * 2);
               ctx.fill();
             });
           }
@@ -1041,22 +1203,62 @@
         draw();
       }
 
-      function nearestPoint(pos) {
+      function distanceToSegment(pos, a, b) {
+        const dx = b.px - a.px;
+        const dy = b.py - a.py;
+        const lenSq = dx * dx + dy * dy;
+        if (lenSq === 0) {
+          return {
+            dist: Math.hypot(pos.x - a.px, pos.y - a.py),
+            t: 0,
+            px: a.px,
+            py: a.py
+          };
+        }
+        const t = clamp(((pos.x - a.px) * dx + (pos.y - a.py) * dy) / lenSq, 0, 1);
+        const px = a.px + dx * t;
+        const py = a.py + dy * t;
+        return {
+          dist: Math.hypot(pos.x - px, pos.y - py),
+          t,
+          px,
+          py
+        };
+      }
+
+      function nearestPoint(pos, threshold = 14) {
         if (!state.view || !state.traces.length) return null;
         let best = null;
         let bestDist = Infinity;
         state.traces.forEach((trace) => {
-          trace.x.forEach((x, index) => {
-            const px = xToPx(x);
-            const py = yToPx(trace.y[index]);
-            const dist = Math.hypot(px - pos.x, py - pos.y);
-            if (dist < bestDist) {
-              bestDist = dist;
-              best = { trace, index, px, py, x, y: trace.y[index] };
+          for (let index = 0; index < trace.x.length - 1; index += 1) {
+            const a = {
+              px: xToPx(trace.x[index]),
+              py: yToPx(trace.y[index]),
+              x: trace.x[index],
+              y: trace.y[index]
+            };
+            const b = {
+              px: xToPx(trace.x[index + 1]),
+              py: yToPx(trace.y[index + 1]),
+              x: trace.x[index + 1],
+              y: trace.y[index + 1]
+            };
+            const near = distanceToSegment(pos, a, b);
+            if (near.dist < bestDist) {
+              bestDist = near.dist;
+              best = {
+                trace,
+                index,
+                px: near.px,
+                py: near.py,
+                x: a.x + (b.x - a.x) * near.t,
+                y: a.y + (b.y - a.y) * near.t
+              };
             }
-          });
+          }
         });
-        return bestDist <= 14 ? best : null;
+        return bestDist <= threshold ? best : null;
       }
 
       function showTooltip(point) {
@@ -1076,6 +1278,136 @@
 
       function hideTooltip() {
         els.tooltip.style.display = "none";
+      }
+
+      function normalizeColor(color) {
+        return /^#[0-9a-f]{6}$/i.test(color) ? color : "#246bfe";
+      }
+
+      function openColorPicker(point) {
+        if (!point?.trace) return;
+        state.colorTarget = point.trace;
+        els.colorPicker.value = normalizeColor(point.trace.color);
+        setMessage(`正在修改 ${point.trace.name} 的颜色`, "ok");
+        els.colorPicker.click();
+      }
+
+      function applySelectedColor() {
+        if (!state.colorTarget) return;
+        state.colorTarget.color = els.colorPicker.value;
+        setMessage(`已修改 ${state.colorTarget.name} 的颜色`, "ok");
+        renderSwatches();
+        draw();
+      }
+
+      function selectTrace(trace, point = null) {
+        if (!trace) return;
+        state.selectedTrace = trace;
+        if (point) state.hover = point;
+        renderSwatches();
+      }
+
+      function metricLabel(type) {
+        return {
+          max: "MAX",
+          min: "MIN",
+          rms: "RMS"
+        }[type] || type.toUpperCase();
+      }
+
+      function computeMetric(trace, type) {
+        if (!trace?.y?.length) return null;
+        if (type === "rms") {
+          const sumSq = trace.y.reduce((sum, value) => sum + value * value, 0);
+          return { type, value: Math.sqrt(sumSq / trace.y.length) };
+        }
+
+        let bestIndex = 0;
+        for (let index = 1; index < trace.y.length; index += 1) {
+          if (type === "max" && trace.y[index] > trace.y[bestIndex]) bestIndex = index;
+          if (type === "min" && trace.y[index] < trace.y[bestIndex]) bestIndex = index;
+        }
+        return {
+          type,
+          value: trace.y[bestIndex],
+          x: trace.x[bestIndex],
+          index: bestIndex
+        };
+      }
+
+      function metricText(trace, result) {
+        if (!trace || !result) return "";
+        const label = metricLabel(result.type);
+        if (result.type === "rms") {
+          return `${trace.name}：${label} = ${formatNumber(result.value)}`;
+        }
+        return `${trace.name}：${label} = ${formatNumber(result.value)}，X = ${formatX(result.x)}`;
+      }
+
+      function renderMetricForField(fieldIndex) {
+        const el = document.getElementById(`yMetric${fieldIndex}`);
+        if (!el) return;
+        const types = state.metricSelections[fieldIndex] || [];
+        const trace = findTraceByFieldIndex(fieldIndex);
+        const rows = trace
+          ? types.map((type) => ({ type, result: computeMetric(trace, type) })).filter((item) => item.result)
+          : [];
+        el.innerHTML = rows.map(({ type, result }) => `
+          <div class="metric-row">
+            <span>${escapeHtml(metricText(trace, result))}</span>
+            <button class="metric-clear" type="button" title="清除此统计" aria-label="清除 ${metricLabel(type)}" data-field-index="${fieldIndex}" data-metric="${type}">×</button>
+          </div>
+        `).join("");
+        el.classList.toggle("active", rows.length > 0);
+      }
+
+      function renderAllMetricResults() {
+        const count = clamp(Number(els.seriesCount.value) || 1, 1, 12);
+        for (let i = 0; i < count; i += 1) {
+          renderMetricForField(i);
+        }
+      }
+
+      function chooseMetric(type) {
+        if (!state.selectedTrace) return;
+        const fieldIndex = state.selectedTrace.fieldIndex;
+        const selections = state.metricSelections[fieldIndex] || [];
+        if (!selections.includes(type)) selections.push(type);
+        state.metricSelections[fieldIndex] = selections;
+        renderMetricForField(fieldIndex);
+        setMessage(`已计算 ${state.selectedTrace.name} 的 ${metricLabel(type)}`, "ok");
+      }
+
+      function clearMetric(fieldIndex, type) {
+        const selections = state.metricSelections[fieldIndex] || [];
+        state.metricSelections[fieldIndex] = selections.filter((item) => item !== type);
+        if (!state.metricSelections[fieldIndex].length) delete state.metricSelections[fieldIndex];
+        renderMetricForField(fieldIndex);
+      }
+
+      function showMetricMenu(pos) {
+        if (!state.selectedTrace) return;
+        els.metricMenu.style.display = "block";
+        const wrapRect = els.canvasWrap.getBoundingClientRect();
+        const menuRect = els.metricMenu.getBoundingClientRect();
+        const x = clamp(pos.x + 4, 8, wrapRect.width - menuRect.width - 8);
+        const y = clamp(pos.y + 4, 8, wrapRect.height - menuRect.height - 8);
+        els.metricMenu.style.left = `${x}px`;
+        els.metricMenu.style.top = `${y}px`;
+      }
+
+      function hideMetricMenu() {
+        els.metricMenu.style.display = "none";
+      }
+
+      function pickCurveColorAt(pos) {
+        const point = insidePlot(pos) ? nearestPoint(pos, 18) : null;
+        if (!point) return false;
+        selectTrace(point.trace, point);
+        showTooltip(point);
+        draw();
+        openColorPicker(point);
+        return true;
       }
 
       function escapeHtml(text) {
@@ -1118,9 +1450,17 @@
         state.view = null;
         state.hover = null;
         state.selection = null;
+        state.colorTarget = null;
+        state.selectedTrace = null;
+        state.metricSelections = {};
+        state.xKind = "number";
+        state.xLabels = [];
         hideTooltip();
+        hideMetricMenu();
         updateStatus();
         setMessage("X 为空时使用数据序号");
+        renderAllMetricResults();
+        renderSwatches();
         draw();
       }
 
@@ -1135,8 +1475,28 @@
       els.resetBtn.addEventListener("click", resetView);
       els.panBtn.addEventListener("click", () => setMode("pan"));
       els.zoomBoxBtn.addEventListener("click", () => setMode("box"));
+      els.colorPicker.addEventListener("input", applySelectedColor);
+      els.colorPicker.addEventListener("change", applySelectedColor);
+      els.metricMenu.addEventListener("click", (event) => {
+        const button = event.target.closest("button[data-metric]");
+        if (!button) return;
+        chooseMetric(button.dataset.metric);
+        hideMetricMenu();
+      });
+      els.yFields.addEventListener("click", (event) => {
+        const button = event.target.closest(".metric-clear");
+        if (!button) return;
+        clearMetric(Number(button.dataset.fieldIndex), button.dataset.metric);
+      });
+      document.addEventListener("click", (event) => {
+        if (!els.metricMenu.contains(event.target)) hideMetricMenu();
+      });
+      window.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") hideMetricMenu();
+      });
 
       els.canvas.addEventListener("mousedown", (event) => {
+        if (event.button !== 0) return;
         if (!state.view) return;
         const pos = pointerPosition(event);
         if (!insidePlot(pos)) return;
@@ -1145,6 +1505,7 @@
         state.startView = { ...state.view };
         els.canvas.classList.add("dragging");
         hideTooltip();
+        hideMetricMenu();
         if (state.mode === "box") {
           state.selection = { x1: pos.x, y1: pos.y, x2: pos.x, y2: pos.y };
         }
@@ -1180,8 +1541,10 @@
         draw();
       });
 
-      window.addEventListener("mouseup", () => {
+      window.addEventListener("mouseup", (event) => {
         if (!state.dragging) return;
+        const pos = pointerPosition(event);
+        const clickDistance = state.dragStart ? Math.hypot(pos.x - state.dragStart.x, pos.y - state.dragStart.y) : Infinity;
         els.canvas.classList.remove("dragging");
         if (state.mode === "box" && state.selection) {
           const s = state.selection;
@@ -1194,9 +1557,37 @@
             updateStatus();
           }
           state.selection = null;
+          if (clickDistance <= 5) {
+            state.dragging = false;
+            if (pickCurveColorAt(pos)) return;
+          }
+        } else if (state.mode === "pan" && clickDistance <= 5) {
+          state.view = { ...state.startView };
+          updateStatus();
+          state.dragging = false;
+          if (pickCurveColorAt(pos)) return;
         }
         state.dragging = false;
         draw();
+      });
+
+      els.canvas.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+        if (!state.view) return;
+        const pos = pointerPosition(event);
+        if (!insidePlot(pos)) {
+          hideMetricMenu();
+          return;
+        }
+        const point = nearestPoint(pos, 18);
+        if (point) {
+          selectTrace(point.trace, point);
+          showTooltip(point);
+          draw();
+        }
+        if (state.selectedTrace) {
+          showMetricMenu(pos);
+        }
       });
 
       els.canvas.addEventListener("wheel", (event) => {
@@ -1214,6 +1605,6 @@
       resizeCanvas();
       fillSample();
     })();
-  </script>
+</script>
 </body>
 </html>
