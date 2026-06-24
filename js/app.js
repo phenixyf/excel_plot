@@ -6,6 +6,7 @@
 
   const I18N = {
     zh: {
+      resizePanels: "调整数据区和绘图区宽度",
       appTitle: "Excel 数据曲线图",
       inputAria: "数据输入",
       plotAria: "曲线图",
@@ -56,6 +57,17 @@
       maxMenu: "最大值 (MAX)",
       minMenu: "最小值 (MIN)",
       rmsMenu: "有效值 (RMS)",
+      gainOffsetMenu: "增益和截距 (Gain / Offset)",
+      gainOffset: "增益和截距",
+      selectFirstPoint: "请在曲线 {name} 上点击选择第一点",
+      selectSecondPoint: "已选择第一点，请点击选择第二点",
+      pointSelectionMiss: "请点击选中曲线附近",
+      sameXError: "两点的 X 坐标不能相同，请重新选择第二点",
+      gainOffsetComputed: "已计算 {name} 的 Gain 和 Offset",
+      gainValue: "Gain = {value}",
+      offsetValue: "Offset = {value}",
+      pointValue: "{point}：X = {x}，Y = {y}",
+      cancelSelection: "取消选择",
       max: "MAX",
       min: "MIN",
       rms: "RMS",
@@ -66,6 +78,7 @@
       unsupportedXlsx: "当前浏览器不支持本地解压 XLSX，请改用 CSV 或新版 Chrome/Edge"
     },
     en: {
+      resizePanels: "Resize data and plot panels",
       appTitle: "Excel Data Plot",
       inputAria: "Data input",
       plotAria: "Plot",
@@ -116,6 +129,17 @@
       maxMenu: "Maximum (MAX)",
       minMenu: "Minimum (MIN)",
       rmsMenu: "RMS",
+      gainOffsetMenu: "Gain and Offset",
+      gainOffset: "Gain and Offset",
+      selectFirstPoint: "Click the first point on {name}",
+      selectSecondPoint: "First point selected. Click the second point",
+      pointSelectionMiss: "Click near the selected curve",
+      sameXError: "The two X coordinates must differ. Select the second point again",
+      gainOffsetComputed: "Calculated Gain and Offset for {name}",
+      gainValue: "Gain = {value}",
+      offsetValue: "Offset = {value}",
+      pointValue: "{point}: X = {x}, Y = {y}",
+      cancelSelection: "Cancel selection",
       max: "MAX",
       min: "MIN",
       rms: "RMS",
@@ -128,6 +152,8 @@
   };
 
   const els = {
+    appShell: document.getElementById("appShell"),
+    layoutSplitter: document.getElementById("layoutSplitter"),
     inputPanel: document.getElementById("inputPanel"),
     plotPanel: document.getElementById("plotPanel"),
     appTitle: document.getElementById("appTitle"),
@@ -169,6 +195,9 @@
     tooltip: document.getElementById("tooltip"),
     colorPicker: document.getElementById("colorPicker"),
     metricMenu: document.getElementById("metricMenu"),
+    pointSelectPrompt: document.getElementById("pointSelectPrompt"),
+    pointSelectText: document.getElementById("pointSelectText"),
+    cancelPointSelectBtn: document.getElementById("cancelPointSelectBtn"),
     status: document.getElementById("status"),
     message: document.getElementById("message"),
     swatches: document.getElementById("swatches")
@@ -188,6 +217,8 @@
     colorTarget: null,
     selectedTrace: null,
     metricSelections: {},
+    gainOffsetResults: {},
+    pointSelection: null,
     xKind: "number",
     xLabels: [],
     lang: "zh",
@@ -199,9 +230,13 @@
     currentSheetIndex: 0,
     fileOrientation: "column",
     fileHasHeader: true,
+    layoutRatio: 0.34,
+    layoutDragging: false,
     dpr: 1,
     rect: { left: 70, right: 22, top: 24, bottom: 52, width: 0, height: 0 }
   };
+
+  let canvasResizeFrame = 0;
 
   function clamp(value, min, max) {
     return Math.min(max, Math.max(min, value));
@@ -256,11 +291,16 @@
     setText(els.resetBtn, t("reset"));
     els.inputPanel.setAttribute("aria-label", t("inputAria"));
     els.plotPanel.setAttribute("aria-label", t("plotAria"));
+    els.layoutSplitter.setAttribute("aria-label", t("resizePanels"));
+    els.layoutSplitter.setAttribute("title", t("resizePanels"));
     els.colorPicker.setAttribute("aria-label", t("editColor", { name: "" }).trim());
     els.metricMenu.setAttribute("aria-label", t("metricOptions"));
     els.metricMenu.querySelector('[data-metric="max"]').textContent = t("maxMenu");
     els.metricMenu.querySelector('[data-metric="min"]').textContent = t("minMenu");
     els.metricMenu.querySelector('[data-metric="rms"]').textContent = t("rmsMenu");
+    els.metricMenu.querySelector('[data-metric="gainOffset"]').textContent = t("gainOffsetMenu");
+    els.cancelPointSelectBtn.setAttribute("title", t("cancelSelection"));
+    els.cancelPointSelectBtn.setAttribute("aria-label", t("cancelSelection"));
     if (state.lastFileStatus) {
       els.fileStatus.textContent = t(state.lastFileStatus.key, state.lastFileStatus.args);
       els.fileStatus.className = `file-status full ${state.lastFileStatus.type || ""}`.trim();
@@ -273,6 +313,7 @@
     renderSwatches();
     updateStatus();
     refreshLastMessage();
+    refreshPointSelectionPrompt();
   }
 
   function niceNumber(value) {
@@ -968,6 +1009,7 @@
 
   function plotFromInputs() {
     try {
+      if (state.pointSelection) cancelPointSelection();
       const selectedFieldIndex = state.selectedTrace?.fieldIndex;
       state.traces = collectData();
       state.bounds = computeBounds(state.traces);
@@ -1013,6 +1055,51 @@
       swatch.title = trace ? trace.name : `Y${i + 1}`;
       els.swatches.appendChild(swatch);
     }
+  }
+
+  function appLayoutMetrics() {
+    const style = getComputedStyle(els.appShell);
+    const horizontalPadding = (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.paddingRight) || 0);
+    const contentWidth = Math.max(1, els.appShell.clientWidth - horizontalPadding);
+    const splitterWidth = els.layoutSplitter.offsetWidth || 6;
+    const minInput = Math.min(260, Math.max(160, contentWidth * 0.28));
+    const minPlot = Math.min(420, Math.max(140, contentWidth * 0.42));
+    const maxInput = Math.max(minInput, contentWidth - splitterWidth - minPlot);
+    return { contentWidth, splitterWidth, minInput, maxInput };
+  }
+
+  function scheduleCanvasResize() {
+    if (canvasResizeFrame) return;
+    canvasResizeFrame = requestAnimationFrame(() => {
+      canvasResizeFrame = 0;
+      resizeCanvas();
+    });
+  }
+
+  function setInputPanelWidth(width, remember = true) {
+    const metrics = appLayoutMetrics();
+    const clamped = clamp(width, metrics.minInput, metrics.maxInput);
+    els.appShell.style.setProperty("--input-width", `${clamped}px`);
+    if (remember) {
+      state.layoutRatio = clamped / Math.max(1, metrics.contentWidth - metrics.splitterWidth);
+    }
+    els.layoutSplitter.setAttribute("aria-valuemin", String(Math.round(metrics.minInput)));
+    els.layoutSplitter.setAttribute("aria-valuemax", String(Math.round(metrics.maxInput)));
+    els.layoutSplitter.setAttribute("aria-valuenow", String(Math.round(clamped)));
+    scheduleCanvasResize();
+  }
+
+  function applyResponsiveLayout() {
+    const metrics = appLayoutMetrics();
+    const availableWidth = Math.max(1, metrics.contentWidth - metrics.splitterWidth);
+    setInputPanelWidth(availableWidth * state.layoutRatio, false);
+  }
+
+  function splitterWidthFromPointer(clientX) {
+    const rect = els.appShell.getBoundingClientRect();
+    const style = getComputedStyle(els.appShell);
+    const paddingLeft = parseFloat(style.paddingLeft) || 0;
+    return clientX - rect.left - paddingLeft;
   }
 
   function resizeCanvas() {
@@ -1252,6 +1339,28 @@
     ctx.restore();
   }
 
+  function drawPointSelection() {
+    if (!state.pointSelection?.points?.length || !state.view) return;
+    ctx.save();
+    ctx.font = "12px Segoe UI, Microsoft YaHei, Arial";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "bottom";
+    state.pointSelection.points.forEach((point, index) => {
+      const px = xToPx(point.x);
+      const py = yToPx(point.y);
+      ctx.fillStyle = state.pointSelection.trace.color;
+      ctx.beginPath();
+      ctx.arc(px, py, 6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.fillStyle = "#1f2933";
+      ctx.fillText(`P${index + 1}`, px + 8, py - 6);
+    });
+    ctx.restore();
+  }
+
   function drawSelection() {
     if (!state.selection) return;
     const { x1, y1, x2, y2 } = state.selection;
@@ -1273,6 +1382,7 @@
     drawGridAndAxes();
     drawTraces();
     drawHover();
+    drawPointSelection();
     drawSelection();
     drawLegend();
   }
@@ -1288,6 +1398,7 @@
   }
 
   function setMode(mode) {
+    if (state.pointSelection) cancelPointSelection();
     state.mode = mode;
     els.panBtn.classList.toggle("active", mode === "pan");
     els.zoomBoxBtn.classList.toggle("active", mode === "box");
@@ -1362,39 +1473,48 @@
     };
   }
 
+  function nearestPointOnTrace(pos, trace, threshold = 14) {
+    if (!state.view || !trace?.x?.length) return null;
+    let best = null;
+    let bestDist = Infinity;
+    for (let index = 0; index < trace.x.length - 1; index += 1) {
+      const a = {
+        px: xToPx(trace.x[index]),
+        py: yToPx(trace.y[index]),
+        x: trace.x[index],
+        y: trace.y[index]
+      };
+      const b = {
+        px: xToPx(trace.x[index + 1]),
+        py: yToPx(trace.y[index + 1]),
+        x: trace.x[index + 1],
+        y: trace.y[index + 1]
+      };
+      const near = distanceToSegment(pos, a, b);
+      if (near.dist < bestDist) {
+        bestDist = near.dist;
+        best = {
+          trace,
+          index,
+          distance: near.dist,
+          px: near.px,
+          py: near.py,
+          x: a.x + (b.x - a.x) * near.t,
+          y: a.y + (b.y - a.y) * near.t
+        };
+      }
+    }
+    return bestDist <= threshold ? best : null;
+  }
+
   function nearestPoint(pos, threshold = 14) {
     if (!state.view || !state.traces.length) return null;
     let best = null;
-    let bestDist = Infinity;
     state.traces.forEach((trace) => {
-      for (let index = 0; index < trace.x.length - 1; index += 1) {
-        const a = {
-          px: xToPx(trace.x[index]),
-          py: yToPx(trace.y[index]),
-          x: trace.x[index],
-          y: trace.y[index]
-        };
-        const b = {
-          px: xToPx(trace.x[index + 1]),
-          py: yToPx(trace.y[index + 1]),
-          x: trace.x[index + 1],
-          y: trace.y[index + 1]
-        };
-        const near = distanceToSegment(pos, a, b);
-        if (near.dist < bestDist) {
-          bestDist = near.dist;
-          best = {
-            trace,
-            index,
-            px: near.px,
-            py: near.py,
-            x: a.x + (b.x - a.x) * near.t,
-            y: a.y + (b.y - a.y) * near.t
-          };
-        }
-      }
+      const candidate = nearestPointOnTrace(pos, trace, threshold);
+      if (candidate && (!best || candidate.distance < best.distance)) best = candidate;
     });
-    return bestDist <= threshold ? best : null;
+    return best;
   }
 
   function showTooltip(point) {
@@ -1443,6 +1563,92 @@
     renderSwatches();
   }
 
+  function setPointSelectionPrompt(key, args = {}, isError = false) {
+    if (!state.pointSelection) return;
+    state.pointSelection.promptKey = key;
+    state.pointSelection.promptArgs = args;
+    state.pointSelection.promptError = isError;
+    els.pointSelectText.textContent = t(key, args);
+    els.pointSelectPrompt.classList.add("active");
+    els.pointSelectPrompt.classList.toggle("error", isError);
+  }
+
+  function refreshPointSelectionPrompt() {
+    if (!state.pointSelection) return;
+    setPointSelectionPrompt(
+      state.pointSelection.promptKey || "selectFirstPoint",
+      state.pointSelection.promptArgs || { name: state.pointSelection.trace.name },
+      Boolean(state.pointSelection.promptError)
+    );
+  }
+
+  function cancelPointSelection() {
+    state.pointSelection = null;
+    state.hover = null;
+    els.pointSelectPrompt.classList.remove("active", "error");
+    els.canvas.classList.remove("point-selecting");
+    hideTooltip();
+    draw();
+  }
+
+  function startGainOffsetSelection() {
+    if (!state.selectedTrace) return;
+    state.pointSelection = {
+      trace: state.selectedTrace,
+      points: [],
+      promptKey: "selectFirstPoint",
+      promptArgs: { name: state.selectedTrace.name },
+      promptError: false
+    };
+    els.canvas.classList.add("point-selecting");
+    hideMetricMenu();
+    hideTooltip();
+    refreshPointSelectionPrompt();
+    draw();
+  }
+
+  function selectGainOffsetPoint(event) {
+    if (!state.pointSelection) return;
+    const pos = pointerPosition(event);
+    if (!insidePlot(pos)) return;
+    const point = nearestPointOnTrace(pos, state.pointSelection.trace, 24);
+    if (!point) {
+      setPointSelectionPrompt("pointSelectionMiss", {}, true);
+      return;
+    }
+
+    if (!state.pointSelection.points.length) {
+      state.pointSelection.points.push({ x: point.x, y: point.y });
+      state.hover = point;
+      setPointSelectionPrompt("selectSecondPoint", {}, false);
+      showTooltip(point);
+      draw();
+      return;
+    }
+
+    const first = state.pointSelection.points[0];
+    const xTolerance = Math.max(1e-12, Math.abs(state.view.xmax - state.view.xmin) * 1e-9);
+    if (Math.abs(point.x - first.x) <= xTolerance) {
+      setPointSelectionPrompt("sameXError", {}, true);
+      return;
+    }
+
+    const second = { x: point.x, y: point.y };
+    const gain = (second.y - first.y) / (second.x - first.x);
+    const offset = first.y - gain * first.x;
+    const trace = state.pointSelection.trace;
+    const fieldIndex = trace.fieldIndex;
+    state.pointSelection.points.push(second);
+    state.gainOffsetResults[fieldIndex] = {
+      gain,
+      offset,
+      points: [{ ...first }, { ...second }]
+    };
+    cancelPointSelection();
+    renderMetricForField(fieldIndex);
+    setMessage("gainOffsetComputed", { name: trace.name }, "ok");
+  }
+
   function metricLabel(type) {
     return t(type) || type.toUpperCase();
   }
@@ -1483,16 +1689,30 @@
     if (!el) return;
     const types = state.metricSelections[fieldIndex] || [];
     const trace = findTraceByFieldIndex(fieldIndex);
+    const gainOffsetResult = state.gainOffsetResults[fieldIndex];
     const rows = trace
       ? types.map((type) => ({ type, result: computeMetric(trace, type) })).filter((item) => item.result)
       : [];
-    el.innerHTML = rows.map(({ type, result }) => `
+    const metricRows = rows.map(({ type, result }) => `
       <div class="metric-row">
         <span>${escapeHtml(metricText(trace, result))}</span>
         <button class="metric-clear" type="button" title="${t("metricClear")}" aria-label="${t("metricClear")} ${metricLabel(type)}" data-field-index="${fieldIndex}" data-metric="${type}">×</button>
       </div>
     `).join("");
-    el.classList.toggle("active", rows.length > 0);
+    const gainOffsetRow = trace && gainOffsetResult ? `
+      <div class="metric-row">
+        <span class="metric-details">
+          <strong>${escapeHtml(`${trace.name}${state.lang === "zh" ? "：" : ": "}${t("gainOffset")}`)}</strong>
+          <span>${escapeHtml(t("gainValue", { value: formatNumber(gainOffsetResult.gain) }))}</span>
+          <span>${escapeHtml(t("offsetValue", { value: formatNumber(gainOffsetResult.offset) }))}</span>
+          <span>${escapeHtml(t("pointValue", { point: "P1", x: formatX(gainOffsetResult.points[0].x), y: formatNumber(gainOffsetResult.points[0].y) }))}</span>
+          <span>${escapeHtml(t("pointValue", { point: "P2", x: formatX(gainOffsetResult.points[1].x), y: formatNumber(gainOffsetResult.points[1].y) }))}</span>
+        </span>
+        <button class="metric-clear" type="button" title="${t("metricClear")}" aria-label="${t("metricClear")} ${t("gainOffset")}" data-field-index="${fieldIndex}" data-metric="gainOffset">×</button>
+      </div>
+    ` : "";
+    el.innerHTML = metricRows + gainOffsetRow;
+    el.classList.toggle("active", rows.length > 0 || Boolean(gainOffsetRow));
   }
 
   function renderAllMetricResults() {
@@ -1513,6 +1733,11 @@
   }
 
   function clearMetric(fieldIndex, type) {
+    if (type === "gainOffset") {
+      delete state.gainOffsetResults[fieldIndex];
+      renderMetricForField(fieldIndex);
+      return;
+    }
     const selections = state.metricSelections[fieldIndex] || [];
     state.metricSelections[fieldIndex] = selections.filter((item) => item !== type);
     if (!state.metricSelections[fieldIndex].length) delete state.metricSelections[fieldIndex];
@@ -1596,8 +1821,12 @@
     state.colorTarget = null;
     state.selectedTrace = null;
     state.metricSelections = {};
+    state.gainOffsetResults = {};
+    state.pointSelection = null;
     state.xKind = "number";
     state.xLabels = [];
+    els.pointSelectPrompt.classList.remove("active", "error");
+    els.canvas.classList.remove("point-selecting");
     hideTooltip();
     hideMetricMenu();
     updateStatus();
@@ -1606,6 +1835,41 @@
     renderSwatches();
     draw();
   }
+
+  function stopLayoutDrag(event) {
+    if (!state.layoutDragging) return;
+    state.layoutDragging = false;
+    els.layoutSplitter.classList.remove("dragging");
+    document.body.classList.remove("layout-resizing");
+    if (event?.pointerId !== undefined && els.layoutSplitter.hasPointerCapture?.(event.pointerId)) {
+      els.layoutSplitter.releasePointerCapture(event.pointerId);
+    }
+  }
+
+  els.layoutSplitter.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    state.layoutDragging = true;
+    els.layoutSplitter.classList.add("dragging");
+    document.body.classList.add("layout-resizing");
+    els.layoutSplitter.setPointerCapture?.(event.pointerId);
+    setInputPanelWidth(splitterWidthFromPointer(event.clientX));
+    event.preventDefault();
+  });
+
+  els.layoutSplitter.addEventListener("pointermove", (event) => {
+    if (!state.layoutDragging) return;
+    setInputPanelWidth(splitterWidthFromPointer(event.clientX));
+    event.preventDefault();
+  });
+
+  els.layoutSplitter.addEventListener("pointerup", stopLayoutDrag);
+  els.layoutSplitter.addEventListener("pointercancel", stopLayoutDrag);
+  els.layoutSplitter.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    const direction = event.key === "ArrowLeft" ? -1 : 1;
+    setInputPanelWidth(els.inputPanel.getBoundingClientRect().width + direction * 20);
+    event.preventDefault();
+  });
 
   els.seriesCount.addEventListener("change", syncYFields);
   els.seriesCount.addEventListener("input", () => {
@@ -1664,9 +1928,11 @@
   els.metricMenu.addEventListener("click", (event) => {
     const button = event.target.closest("button[data-metric]");
     if (!button) return;
-    chooseMetric(button.dataset.metric);
+    if (button.dataset.metric === "gainOffset") startGainOffsetSelection();
+    else chooseMetric(button.dataset.metric);
     hideMetricMenu();
   });
+  els.cancelPointSelectBtn.addEventListener("click", cancelPointSelection);
   els.yFields.addEventListener("click", (event) => {
     const button = event.target.closest(".metric-clear");
     if (!button) return;
@@ -1676,11 +1942,18 @@
     if (!els.metricMenu.contains(event.target)) hideMetricMenu();
   });
   window.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") hideMetricMenu();
+    if (event.key === "Escape") {
+      hideMetricMenu();
+      if (state.pointSelection) cancelPointSelection();
+    }
   });
 
   els.canvas.addEventListener("mousedown", (event) => {
     if (event.button !== 0) return;
+    if (state.pointSelection) {
+      event.preventDefault();
+      return;
+    }
     if (!state.view) return;
     const pos = pointerPosition(event);
     if (!insidePlot(pos)) return;
@@ -1697,6 +1970,17 @@
 
   window.addEventListener("mousemove", (event) => {
     const pos = pointerPosition(event);
+    if (state.pointSelection) {
+      if (!insidePlot(pos)) {
+        state.hover = null;
+        hideTooltip();
+      } else {
+        state.hover = nearestPointOnTrace(pos, state.pointSelection.trace, 24);
+        showTooltip(state.hover);
+      }
+      draw();
+      return;
+    }
     if (state.dragging) {
       if (state.mode === "pan") {
         panTo(pos);
@@ -1761,6 +2045,7 @@
 
   els.canvas.addEventListener("contextmenu", (event) => {
     event.preventDefault();
+    if (state.pointSelection) return;
     if (!state.view) return;
     const pos = pointerPosition(event);
     if (!insidePlot(pos)) {
@@ -1779,18 +2064,31 @@
   });
 
   els.canvas.addEventListener("wheel", (event) => {
+    if (state.pointSelection) {
+      event.preventDefault();
+      return;
+    }
     if (!state.view) return;
     event.preventDefault();
     const factor = event.deltaY < 0 ? 0.82 : 1.22;
     zoomAt(pointerPosition(event), factor);
   }, { passive: false });
 
-  els.canvas.addEventListener("dblclick", resetView);
+  els.canvas.addEventListener("click", selectGainOffsetPoint);
+  els.canvas.addEventListener("dblclick", () => {
+    if (!state.pointSelection) resetView();
+  });
 
-  window.addEventListener("resize", resizeCanvas);
+  window.addEventListener("resize", applyResponsiveLayout);
+
+  if (typeof ResizeObserver !== "undefined") {
+    const canvasResizeObserver = new ResizeObserver(scheduleCanvasResize);
+    canvasResizeObserver.observe(els.canvasWrap);
+  }
 
   setFileStatus("fileEmpty");
   syncYFields();
+  applyResponsiveLayout();
   resizeCanvas();
   fillSample();
   applyLanguage();

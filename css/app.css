@@ -11,6 +11,8 @@
   --green: #15803d;
   --danger: #b42318;
   --shadow: 0 12px 30px rgba(31, 41, 51, 0.08);
+  --input-width: clamp(260px, 34vw, 410px);
+  --splitter-size: 6px;
   font-family: "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
 }
 
@@ -20,8 +22,10 @@
 
 html,
 body {
+  width: 100%;
   height: 100%;
   margin: 0;
+  overflow: hidden;
 }
 
 body {
@@ -30,11 +34,15 @@ body {
 }
 
 .app {
-  min-height: 100%;
+  width: 100%;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
   display: grid;
-  grid-template-columns: minmax(320px, 410px) minmax(0, 1fr);
-  gap: 16px;
-  padding: 16px;
+  grid-template-columns: var(--input-width) var(--splitter-size) minmax(0, 1fr);
+  gap: 0;
+  padding: clamp(8px, 1vw, 16px);
+  overflow: hidden;
 }
 
 .input-panel,
@@ -44,13 +52,49 @@ body {
   border-radius: 8px;
   box-shadow: var(--shadow);
   min-width: 0;
+  min-height: 0;
+  height: 100%;
 }
 
 .input-panel {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  max-height: calc(100vh - 32px);
+  max-height: none;
+}
+
+.layout-splitter {
+  position: relative;
+  min-width: var(--splitter-size);
+  height: 100%;
+  cursor: col-resize;
+  touch-action: none;
+  outline: none;
+  z-index: 5;
+}
+
+.layout-splitter::before {
+  content: "";
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  left: calc(50% - 0.5px);
+  width: 1px;
+  background: var(--line);
+  transition: width 120ms ease, left 120ms ease, background 120ms ease;
+}
+
+.layout-splitter:hover::before,
+.layout-splitter:focus-visible::before,
+.layout-splitter.dragging::before {
+  left: calc(50% - 1px);
+  width: 2px;
+  background: var(--accent);
+}
+
+body.layout-resizing {
+  cursor: col-resize;
+  user-select: none;
 }
 
 .panel-header {
@@ -295,6 +339,8 @@ textarea:focus {
 }
 
 .field-list {
+  flex: 1 1 auto;
+  min-height: 0;
   padding: 14px 16px 4px;
   overflow: auto;
 }
@@ -365,6 +411,17 @@ textarea {
   margin-top: 5px;
   padding-top: 5px;
   border-top: 1px solid rgba(36, 107, 254, 0.16);
+}
+
+.metric-details {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.metric-details strong {
+  font-weight: 650;
 }
 
 .metric-clear {
@@ -443,7 +500,7 @@ button.icon {
 .plot-panel {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
-  min-height: calc(100vh - 32px);
+  min-height: 0;
   overflow: hidden;
 }
 
@@ -480,7 +537,9 @@ button.icon {
 
 .canvas-wrap {
   position: relative;
-  min-height: 420px;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
   background:
     linear-gradient(90deg, rgba(237, 240, 244, 0.85) 1px, transparent 1px),
     linear-gradient(rgba(237, 240, 244, 0.85) 1px, transparent 1px),
@@ -501,6 +560,11 @@ canvas.pan-mode {
 
 canvas.pan-mode.dragging {
   cursor: grabbing;
+}
+
+canvas.point-selecting,
+canvas.pan-mode.point-selecting {
+  cursor: crosshair;
 }
 
 .tooltip {
@@ -557,6 +621,51 @@ canvas.pan-mode.dragging {
   color: #174ea6;
 }
 
+.point-select-prompt {
+  position: absolute;
+  display: none;
+  align-items: center;
+  gap: 10px;
+  top: 12px;
+  left: 50%;
+  max-width: calc(100% - 32px);
+  transform: translateX(-50%);
+  padding: 8px 8px 8px 12px;
+  border: 1px solid #9db9ff;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.97);
+  color: #174ea6;
+  box-shadow: 0 8px 20px rgba(31, 41, 51, 0.14);
+  font-size: 12px;
+  line-height: 1.35;
+  z-index: 5;
+}
+
+.point-select-prompt.active {
+  display: flex;
+}
+
+.point-select-prompt.error {
+  border-color: #f0a6a0;
+  color: var(--danger);
+}
+
+.prompt-cancel {
+  flex: 0 0 26px;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: currentColor;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.prompt-cancel:hover {
+  background: var(--soft-line);
+}
+
 .plot-footer {
   display: flex;
   align-items: center;
@@ -606,28 +715,14 @@ canvas.pan-mode.dragging {
 
 @media (max-width: 900px) {
   .app {
-    grid-template-columns: 1fr;
-  }
-
-  .input-panel,
-  .plot-panel {
-    max-height: none;
-    min-height: auto;
-  }
-
-  .plot-panel {
-    min-height: 520px;
-  }
-
-  .canvas-wrap {
-    min-height: 420px;
+    padding: 8px;
   }
 }
 
 @media (max-width: 520px) {
   .app {
-    padding: 10px;
-    gap: 10px;
+    padding: 6px;
+    gap: 0;
   }
 
   .panel-header,
